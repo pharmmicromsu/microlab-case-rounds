@@ -376,6 +376,11 @@
   .live-card textarea{min-height:72px; line-height:1.5;}
   .card-edit{border:1px solid var(--line); border-radius:4px; padding:12px; margin-bottom:12px; background:var(--paper); display:flex; flex-direction:column; gap:8px;}
   .card-edit-head{display:flex; justify-content:space-between; align-items:center; font-family:var(--mono); font-size:11px; color:var(--gold);}
+  .sub-switch{display:flex; gap:8px; margin:0 0 10px; flex-wrap:wrap;}
+  .sub-prompt{border:1px solid var(--line); border-left:3px solid var(--gold); border-radius:4px; padding:10px 12px; margin-bottom:12px; background:var(--paper); font-size:14.5px; line-height:1.55; white-space:pre-wrap;}
+  .sub-prompt .sp-tag{display:block; font-family:var(--mono); font-size:11px; color:var(--gold); margin-bottom:4px;}
+  .sub-edit{border:1px solid var(--line); border-radius:4px; padding:12px; margin-bottom:12px; background:var(--paper); display:flex; flex-direction:column; gap:8px;}
+  .sub-edit textarea{min-height:72px; line-height:1.5;}
 </style>
 </head>
 <body>
@@ -458,6 +463,8 @@
               <h2>คำตอบที่ส่งเข้ามา</h2>
               <button class="clear" id="revealToggleBtn" onclick="toggleReveal()"></button>
             </div>
+            <div class="sub-switch hidden" id="subSwitch"></div>
+            <div class="sub-prompt hidden" id="subLabel"></div>
             <div class="submissions-strip" id="submitStrip"></div>
             <div id="revealedAnswers" style="margin-top:14px;"></div>
             <div id="answersReveal" style="margin-top:14px;"></div>
@@ -530,8 +537,9 @@
         <button class="navbtn" onclick="addEditCard()">+ เพิ่มการ์ดข้อมูล</button>
         <input type="file" id="cardImgFile" accept="image/*" class="hidden" onchange="onCardImagePicked(this)">
       </div>
-      <label>เฉลย/ประเด็นอภิปราย (อาจารย์เห็นฝั่งเดียว ใช้ตอนเปิดเฉลย)</label>
-      <textarea id="editAnswer" placeholder="คำตอบที่คาดหวัง + ประเด็นสำหรับอภิปรายรวม..."></textarea>
+      <label>ข้อย่อยและเฉลย (ข้อย่อย 2 ไม่บังคับ ถ้าเว้นว่างกรณีนี้จะมีข้อเดียว · เฉลยและรูปในเฉลยอาจารย์เห็นฝั่งเดียว)</label>
+      <div id="editSubs"></div>
+      <input type="file" id="subImgFile" accept="image/*" class="hidden" onchange="onSubImagePicked(this)">
       <div class="case-nav">
         <button class="navbtn primary" onclick="saveCase()">บันทึกกรณีนี้</button>
         <button class="navbtn" onclick="newCase()">+ กรณีศึกษาใหม่</button>
@@ -577,6 +585,7 @@
       </div>
 
       <div class="panel answer-box hidden" id="answerPanel">
+        <div class="sub-prompt hidden" id="subPrompt"></div>
         <label style="font-family:var(--mono);font-size:11px;color:var(--ink-1);">คำตอบของกลุ่ม (อาจารย์เปิดรับคำตอบแล้ว)</label>
         <textarea id="answerText" placeholder="พิมพ์คำตอบของกลุ่มที่นี่..."></textarea>
         <button class="submit-btn" id="submitAnswerBtn" onclick="submitAnswer()">ส่งคำตอบ</button>
@@ -584,7 +593,7 @@
       </div>
 
       <div class="panel hidden" id="sRevealPanel">
-        <div class="queue-head"><h2>คำตอบของทุกกลุ่ม</h2></div>
+        <div class="queue-head"><h2 id="sRevealTitle">คำตอบของทุกกลุ่ม</h2></div>
         <div class="reveal-grid" id="sRevealGrid"></div>
       </div>
     </div>
@@ -733,19 +742,22 @@ let answersCache = {};
 let editingIndex = null;
 let editingImages = [];
 let editingCards = [];
+let editingSubs = [{q:'',answer:'',images:[]},{q:'',answer:'',images:[]}];
+let subImgTarget = null;
 let cardImgTarget = null;
 let liveImages = [];
 const shownSeen = {};
 let editorOpen = false;
 
 function applyTeacherState(st){
-  configCache = { cases: st.cases || [], activeIndex: st.activeIndex || 0, phase: st.phase || 'questions' };
-  answersCache = { revealed: !!st.revealed, byGroup: st.answers || {} };
+  configCache = { cases: st.cases || [], activeIndex: st.activeIndex || 0, phase: st.phase || 'questions', sub: st.sub || 0 };
+  const curAns = (st.ans || [])[st.sub || 0] || {};
+  answersCache = { revealed: !!st.revealed, byGroup: curAns };
   renderTeacherConfig(configCache);
   renderQueue(st.queue || []);
-  renderSubmissions(st.answers || {});
+  renderSubmissions(curAns);
   renderRevealToggle(!!st.revealed);
-  if(st.revealed) renderRevealedAnswers(st.answers || {});
+  if(st.revealed) renderRevealedAnswers(curAns);
   else document.getElementById('revealedAnswers').innerHTML = '';
   numGroups = st.numGroups || 8;
   const sel = document.getElementById('numGroupsSel');
@@ -777,29 +789,66 @@ function renderTeacherConfig(data){
   document.getElementById('nextCaseBtn').disabled = idx >= cases.length-1;
 
   const phase = data.phase || 'questions';
+  const subCount = subCountOf(c);
+  const sub = Math.min(data.sub || 0, subCount - 1);
+  const subTag = subCount > 1 ? ` (ข้อย่อย ${sub+1} จาก ${subCount})` : '';
   document.getElementById('openAnswersBtn').classList.toggle('hidden', phase === 'answers');
   document.getElementById('reopenQuestionsBtn').classList.toggle('hidden', phase !== 'answers');
   document.getElementById('phaseNote').textContent = phase === 'answers'
-    ? 'ขณะนี้: เปิดรับคำตอบแล้ว — นิสิตส่งคำตอบได้ กดขอถามเพิ่มไม่ได้'
+    ? 'ขณะนี้: เปิดรับคำตอบแล้ว' + subTag + ' — นิสิตส่งคำตอบได้ กดขอถามเพิ่มไม่ได้'
     : 'ขณะนี้: รอบถามข้อมูลเพิ่มเติม — นิสิตยังส่งคำตอบไม่ได้ กดขอถามได้หลายรอบ';
 
   if(!editorOpen) renderCaseTabs(cases, idx);
-  renderAnswerReveal(c);
+  renderSubControls(c, sub, phase, subCount);
+  renderAnswerReveal(c, sub, subCount);
   renderImages('caseImages', c.images || []);
+}
+
+function subCountOf(c){
+  const s2 = c && c.subs && c.subs[1];
+  return (s2 && ((s2.q||'').trim() || (s2.answer||'').trim() || (s2.images||[]).length)) ? 2 : 1;
+}
+
+function renderSubControls(c, sub, phase, subCount){
+  const sw = document.getElementById('subSwitch');
+  const lab = document.getElementById('subLabel');
+  const show = phase === 'answers';
+  sw.classList.toggle('hidden', !(show && subCount > 1));
+  if(show && subCount > 1){
+    const key = sub + '/' + subCount;
+    if(sw.dataset.key !== key){
+      sw.dataset.key = key;
+      sw.innerHTML = [0,1].map(i => `<button class="navbtn ${i===sub?'primary':''}" onclick="setSub(${i})">${i===0?'':'ไปที่ '}ข้อย่อย ${i+1}${i===sub?' (ปัจจุบัน)':''}</button>`).join('');
+    }
+  }
+  const q = show && c.subs && c.subs[sub] ? (c.subs[sub].q || '') : '';
+  lab.classList.toggle('hidden', !q);
+  lab.innerHTML = q ? `<span class="sp-tag">โจทย์${subCount > 1 ? ' ข้อย่อย ' + (sub+1) : ''} (นิสิตเห็น)</span>${escapeHtml(q)}` : '';
+}
+
+async function setSub(i){
+  try{ await send({ action:'setSub', sub:i }); }
+  catch(e){ setOffline('เปลี่ยนข้อย่อยไม่สำเร็จ ลองอีกครั้ง'); }
 }
 
 async function openAnswerPhase(){ await send({ action:'setPhase', phase:'answers' }); }
 async function reopenQuestionPhase(){ await send({ action:'setPhase', phase:'questions' }); }
 
-function renderAnswerReveal(c){
+function renderAnswerReveal(c, sub, subCount){
   const el = document.getElementById('answersReveal');
-  if(!c.answer){ el.innerHTML = ''; return; }
-  // คงสถานะเปิด/ปิดของ <details> ไว้ ไม่ให้พับเองทุกครั้งที่ซิงค์
+  const sb = (c.subs || [])[sub] || {};
+  const imgs = sb.images || [];
+  if(!sb.answer && !imgs.length){ el.innerHTML = ''; el.dataset.key = ''; return; }
+  // วาดใหม่เมื่อเนื้อหาเปลี่ยนเท่านั้น: <details> ไม่พับเอง และรูปไม่กะพริบทุกรอบซิงค์
+  const key = sub + '|' + (sb.answer || '') + '|' + imgs.join(',');
+  if(el.dataset.key === key) return;
   const wasOpen = el.querySelector('details')?.open;
+  el.dataset.key = key;
   el.innerHTML = `
     <details ${wasOpen ? 'open' : ''}>
-      <summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--gold);">เปิดเฉลย / ประเด็นอภิปราย</summary>
-      <div style="margin-top:10px;font-size:14.5px;line-height:1.6;white-space:pre-wrap;">${escapeHtml(c.answer)}</div>
+      <summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--gold);">เปิดเฉลย / ประเด็นอภิปราย${subCount > 1 ? ' — ข้อย่อย ' + (sub+1) : ''}</summary>
+      ${sb.answer ? `<div style="margin-top:10px;font-size:14.5px;line-height:1.6;white-space:pre-wrap;">${escapeHtml(sb.answer)}</div>` : ''}
+      ${imgs.length ? `<div class="case-images" style="margin-top:10px;">${imgs.map(imgTag).join('')}</div>` : ''}
     </details>`;
 }
 
@@ -902,7 +951,7 @@ function openEditor(){
   const cases = configCache.cases || [];
   if(cases.length === 0){
     editingIndex = 0;
-    loadEditorFields({topic:'', title:'', body:'', answer:''});
+    loadEditorFields({topic:'', title:'', body:'', subs:[]});
   }else{
     editingIndex = Math.min(configCache.activeIndex||0, cases.length-1);
     loadEditorFields(cases[editingIndex]);
@@ -926,7 +975,16 @@ function loadEditorFields(c){
   document.getElementById('editTopic').value = c.topic || '';
   document.getElementById('editTitle').value = c.title || '';
   document.getElementById('editBody').value = c.body || '';
-  document.getElementById('editAnswer').value = c.answer || '';
+  editingSubs = normalizeEditSubs(c);
+  renderEditSubs();
+}
+
+function normalizeEditSubs(c){
+  const raw = Array.isArray(c.subs) ? c.subs : [{ answer: c.answer }];
+  return [0,1].map(i => {
+    const x = raw[i] || {};
+    return { q: x.q || '', answer: x.answer || '', images: [...(x.images || [])] };
+  });
 }
 
 function renderCaseTabs(cases, activeIdx){
@@ -958,13 +1016,13 @@ async function saveCase(silent){
     topic: document.getElementById('editTopic').value.trim(),
     title: document.getElementById('editTitle').value.trim(),
     body: document.getElementById('editBody').value.trim(),
-    answer: document.getElementById('editAnswer').value.trim(),
+    subs: editingSubs.map(x => ({ q:(x.q||'').trim(), answer:(x.answer||'').trim(), images:[...(x.images||[])] })),
     images: [...editingImages],
     cards: editingCards.filter(k => (k.title||'').trim() || (k.text||'').trim() || (k.images||[]).length)
                        .map(k => ({ id:k.id, title:k.title, text:k.text, images:[...k.images] })),
   };
   // ไม่บันทึกกรณีว่างเปล่าที่เพิ่งเปิดตัวแก้ไขแต่ยังไม่ได้พิมพ์อะไร
-  if(!cases[editingIndex] && !entry.title && !entry.body && !entry.topic && !entry.answer && !entry.images.length && !entry.cards.length) return;
+  if(!cases[editingIndex] && !entry.title && !entry.body && !entry.topic && !entry.subs.some(x => x.q || x.answer || x.images.length) && !entry.images.length && !entry.cards.length) return;
   cases[editingIndex] = entry;
   try{ await pushCases(cases); }
   catch(e){ setOffline('บันทึกไม่สำเร็จ ลองอีกครั้ง'); return; }
@@ -973,7 +1031,7 @@ async function saveCase(silent){
 
 async function newCase(){
   await saveCase(true);
-  const cases = [...(configCache.cases||[]), {id:'c'+Date.now(), topic:'', title:'', body:'', answer:''}];
+  const cases = [...(configCache.cases||[]), {id:'c'+Date.now(), topic:'', title:'', body:'', subs:[{q:'',answer:'',images:[]},{q:'',answer:'',images:[]}]}];
   editingIndex = cases.length - 1;
   await pushCases(cases);
   loadEditorFields(cases[editingIndex]);
@@ -1021,6 +1079,7 @@ function confirmGroup(){
 }
 
 let lastActiveIndex = null;
+let lastSub = null;
 let hadSubmitted = false;
 let myBuzzTs = null;
 
@@ -1033,12 +1092,24 @@ function applyStudentState(st){
 
   const byGroup = st.answers || {};
   const mine = byGroup[String(myGroup)];
+  const sub = st.sub || 0;
+  const subCount = (st.activeCase && st.activeCase.subCount) || 1;
+  const box = document.getElementById('answerText');
+  if(lastSub !== null && lastSub !== sub){ box.value = ''; hadSubmitted = false; }   // อาจารย์ไปข้อย่อยถัดไป/กลับ
+  lastSub = sub;
   document.getElementById('submittedNote').classList.toggle('hidden', !mine);
   document.getElementById('submitAnswerBtn').disabled = !!mine;
-  const box = document.getElementById('answerText');
   if(mine && document.activeElement !== box) box.value = mine.text;
   if(!mine && hadSubmitted) box.value = '';   // อาจารย์รีเซ็ตรอบ
   hadSubmitted = !!mine;
+
+  const sp = document.getElementById('subPrompt');
+  const spText = st.subQ || '';
+  sp.classList.toggle('hidden', !spText && subCount < 2);
+  sp.innerHTML = (spText || subCount > 1)
+    ? `<span class="sp-tag">${subCount > 1 ? 'ข้อย่อย ' + (sub+1) + ' จาก ' + subCount : 'โจทย์'}</span>${escapeHtml(spText)}`
+    : '';
+  document.getElementById('sRevealTitle').textContent = subCount > 1 ? `คำตอบของทุกกลุ่ม (ข้อย่อย ${sub+1})` : 'คำตอบของทุกกลุ่ม';
 
   const revealed = !!st.revealed;
   document.getElementById('sRevealPanel').classList.toggle('hidden', !revealed);
@@ -1058,6 +1129,7 @@ function renderStudentCase(st){
   if(lastActiveIndex !== null && lastActiveIndex !== idx){
     document.getElementById('answerText').value = '';
     document.getElementById('submittedNote').classList.add('hidden');
+    lastSub = null;
     resetBuzzUI();
   }
   lastActiveIndex = idx;
@@ -1443,6 +1515,52 @@ async function onCardImagePicked(input){
     renderEditCards();
     await saveCase(true);
     setImgStatus('เพิ่มรูปแล้ว ✓');
+    setTimeout(() => setImgStatus(''), 2500);
+  }catch(e){ setImgStatus(uploadErrMsg(e)); }
+}
+
+/* ================= ข้อย่อยและเฉลย (ในหน้าแก้ไขกรณีศึกษา) ================= */
+function renderEditSubs(){
+  const el = document.getElementById('editSubs');
+  if(!el) return;
+  el.innerHTML = editingSubs.map((x, i) => `
+    <div class="sub-edit">
+      <div class="card-edit-head"><span>ข้อย่อย ${i + 1}${i === 1 ? ' (ไม่บังคับ)' : ''}</span></div>
+      <label>โจทย์ข้อย่อย (นิสิตเห็นตอนเปิดรับคำตอบข้อนี้)</label>
+      <textarea placeholder="${i === 0 ? 'เช่น 1) ระบุเชื้อที่น่าจะเป็นสาเหตุ พร้อมเหตุผล' : 'เช่น 2) เสนอยาต้านจุลชีพที่เหมาะสม'}" oninput="setSubField(${i},'q',this.value)">${escapeHtml(x.q)}</textarea>
+      <label>เฉลย / ประเด็นอภิปราย (อาจารย์เห็นฝั่งเดียว)</label>
+      <textarea placeholder="คำตอบที่คาดหวัง + ประเด็นสำหรับอภิปรายรวม..." oninput="setSubField(${i},'answer',this.value)">${escapeHtml(x.answer)}</textarea>
+      <div class="edit-images">${(x.images || []).map((id, j) => `
+        <div class="edit-img">
+          <img src="${driveImgUrl(id)}" data-id="${escapeHtml(id)}" alt="" onerror="imgFallback(this)">
+          <button title="เอารูปนี้ออกจากเฉลย" onclick="removeSubImage(${i},${j})">×</button>
+        </div>`).join('')}</div>
+      <div><button class="navbtn" onclick="pickSubImage(${i})">+ รูปในเฉลย (สูงสุด 4 รูป)</button></div>
+    </div>`).join('');
+}
+function setSubField(i, field, value){ if(editingSubs[i]) editingSubs[i][field] = value; }
+async function removeSubImage(i, j){
+  if(!editingSubs[i]) return;
+  editingSubs[i].images.splice(j, 1);
+  renderEditSubs();
+  await saveCase(true);
+}
+function pickSubImage(i){
+  subImgTarget = i;
+  document.getElementById('subImgFile').click();
+}
+async function onSubImagePicked(input){
+  const file = input.files && input.files[0];
+  input.value = '';
+  const i = subImgTarget;
+  if(!file || i === null || !editingSubs[i]) return;
+  if(editingSubs[i].images.length >= 4){ alert('แนบรูปในเฉลยได้สูงสุด 4 รูปต่อข้อย่อย'); return; }
+  setImgStatus('กำลังย่อรูปและอัปโหลด... (ประมาณ 3-10 วินาที)');
+  try{
+    editingSubs[i].images.push(await uploadPickedFile(file));
+    renderEditSubs();
+    await saveCase(true);
+    setImgStatus('เพิ่มรูปในเฉลยแล้ว ✓');
     setTimeout(() => setImgStatus(''), 2500);
   }catch(e){ setImgStatus(uploadErrMsg(e)); }
 }
